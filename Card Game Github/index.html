@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Card Game</title>
+<link rel="manifest" href="manifest.json">
+<style>
+  body { margin:0;padding:0;font-family:Arial,sans-serif;background-color:#1b2a4e;color:white;text-align:center;}
+  #card-container {margin:20px auto;width:90%;max-width:400px;height:500px;perspective:1000px;}
+  #card {width:100%;height:100%;border-radius:12px;background-color:#fff;color:black;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:bold;box-shadow:0 4px 10px rgba(0,0,0,0.3);cursor:pointer;transition:transform 0.6s;transform-style:preserve-3d;position:relative;}
+  #card img {max-width:100%;max-height:100%;border-radius:12px;}
+  #controls {display:flex;flex-wrap:wrap;justify-content:center;margin:15px 0;gap:10px;}
+  button {padding:10px 15px;border-radius:8px;border:none;background-color:#3a4f8f;color:white;font-size:16px;cursor:pointer;min-width:120px;}
+  button:disabled {opacity:0.5;cursor:not-allowed;}
+  #history {max-width:90%;margin:0 auto 20px auto;text-align:left;background:rgba(255,255,255,0.1);padding:10px;border-radius:10px;}
+  #history h3 {margin-top:0;}
+  .history-item {margin:3px 0;font-size:14px;}
+  #pauseOverlay, #endOverlay {position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);color:white;display:none;align-items:center;justify-content:center;z-index:1000;font-size:28px;flex-direction:column;cursor:pointer;}
+  #pauseOverlay button, #endOverlay button {margin-top:20px;min-width:100px;}
+  @media(max-width:500px){#card-container{height:350px;}button{font-size:14px;padding:8px 12px;min-width:100px;}}
+</style>
+</head>
+<body>
+<h1>Card Game</h1>
+<div id="card-container"><div id="card">Press Draw Card</div></div>
+<div id="controls">
+  <button id="backBtn">Back</button>
+  <button id="drawBtn">Draw Card</button>
+  <button id="answeredBtn" disabled>Answered (0/3)</button>
+  <button id="skipBtn" disabled>Skip (0/3)</button>
+  <button id="pauseBtn">Pause</button>
+  <button id="restartLevelBtn">Restart Level</button>
+  <button id="restartGameBtn">Restart Game</button>
+</div>
+<div id="history">
+  <h3>History</h3>
+  <div id="historyList"></div>
+</div>
+<div id="pauseOverlay"><div>Game Paused</div><button id="resumeBtn">Resume</button></div>
+<div id="endOverlay"><div>Can you go deeper? Wanna play again?</div><button id="playAgainBtn">Play Again</button></div>
+
+<script>
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('sw.js').catch(console.error);
+}
+
+/* --- DOM --- */
+const cardEl=document.getElementById("card"),
+      drawBtn=document.getElementById("drawBtn"),
+      answeredBtn=document.getElementById("answeredBtn"),
+      skipBtn=document.getElementById("skipBtn"),
+      backBtn=document.getElementById("backBtn"),
+      pauseBtn=document.getElementById("pauseBtn"),
+      restartLevelBtn=document.getElementById("restartLevelBtn"),
+      restartGameBtn=document.getElementById("restartGameBtn"),
+      historyList=document.getElementById("historyList"),
+      pauseOverlay=document.getElementById("pauseOverlay"),
+      resumeBtn=document.getElementById("resumeBtn"),
+      endOverlay=document.getElementById("endOverlay"),
+      playAgainBtn=document.getElementById("playAgainBtn");
+
+/* --- State --- */
+let decks={}, sequence=[], currentStageIndex=0, currentDeck=[], currentCardIndex=0;
+let skippedCards={}, answeredThisRound=0, skipThisRound=0, cardHistory=[], restartLevelIntro=false, lastCard=null;
+let playedCards={}, totalMainCards=0;
+
+/* --- Helpers --- */
+const shuffle=a=>{for(let i=a.length-1;i>0;i--){let j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a;}
+const updateCounters=()=>{
+  answeredBtn.textContent=`Answered (${answeredThisRound}/3)`;
+  skipBtn.textContent=`Skip (${skipThisRound}/3)`;
+  skipBtn.disabled=(skipThisRound>=3||decks[sequence[currentStageIndex]].sequential);
+  answeredBtn.disabled=decks[sequence[currentStageIndex]].sequential||(restartLevelIntro&&sequence[currentStageIndex].includes("Intro"));
+}
+const showCard=path=>{const img=document.createElement("img");img.src=path;img.onerror=()=>{img.src="placeholder.png"};cardEl.innerHTML="";cardEl.appendChild(img);lastCard=path;}
+const updateHistory=action=>{const div=document.createElement("div");div.className="history-item";div.textContent=`${action}: ${lastCard}`;historyList.appendChild(div);historyList.scrollTop=historyList.scrollHeight;}
+const flashCounter=btn=>{btn.style.backgroundColor="green";setTimeout(()=>{btn.style.backgroundColor="#3a4f8f";},300);}
+const allCardsPlayed=()=>Object.values(playedCards).every((set,index)=>set.size===Object.values(decks).filter(d=>!d.sequential)[index].cards.length);
+
+/* --- Load JSON --- */
+fetch('cards.json').then(r=>r.json()).then(data=>{
+  decks=data;
+  sequence=Object.keys(decks);
+  skippedCards={};
+  playedCards={};
+  for(const k in decks){skippedCards[k]=[]; if(!decks[k].sequential) playedCards[k]=new Set();}
+  totalMainCards=Object.values(decks).filter(d=>!d.sequential).reduce((sum,d)=>sum+d.cards.length,0);
+  loadDeck(sequence[currentStageIndex]);
+}).catch(console.error);
+
+/* --- Flow --- */
+function loadDeck(stage){
+  const deck=decks[stage];
+  if(deck.sequential) currentDeck=Array.from(deck.cards);
+  else{
+    let base=Array.from(deck.cards);
+    if(skippedCards[stage]?.length>0){base=base.concat(skippedCards[stage]); skippedCards[stage]=[];}
+    currentDeck=shuffle(base);
+  }
+  currentCardIndex=0; answeredThisRound=0; skipThisRound=0; updateCounters();
+}
+
+function drawNextCard(){
+  const stage=sequence[currentStageIndex], deck=decks[stage];
+  if(restartLevelIntro && deck.sequential && stage.includes("Intro")){
+    showCard(currentDeck[currentCardIndex]); currentCardIndex++;
+    drawBtn.disabled=false; answeredBtn.disabled=true; skipBtn.disabled=true;
+    if(currentCardIndex>=currentDeck.length) restartLevelIntro=false;
+    return;
+  }
+  if(deck.sequential){
+    if(currentCardIndex<currentDeck.length){showCard(currentDeck[currentCardIndex]); currentCardIndex++; drawBtn.disabled=false; answeredBtn.disabled=true; skipBtn.disabled=true;}
+    else nextStage();
+  }else{
+    if(answeredThisRound>=3){nextStage(); return;}
+    if(currentCardIndex<currentDeck.length){showCard(currentDeck[currentCardIndex]); drawBtn.disabled=false; answeredBtn.disabled=false; skipBtn.disabled=(skipThisRound>=3);}
+    else nextStage();
+  }
+}
+
+function nextStage(){
+  currentStageIndex++;
+  if(currentStageIndex>=sequence.length){ if(allCardsPlayed()){showEndGameBanner(); return;} else currentStageIndex=1;}
+  loadDeck(sequence[currentStageIndex]); drawNextCard();
+}
+
+function showEndGameBanner(){endOverlay.style.display="flex";}
+function resetGame(){endOverlay.style.display="none"; currentStageIndex=0; for(const k in playedCards) playedCards[k]=new Set(); loadDeck(sequence[0]); drawNextCard();}
+
+/* --- Event Listeners --- */
+drawBtn.addEventListener("click",drawNextCard);
+cardEl.addEventListener("click",()=>{const stage=sequence[currentStageIndex]; if(decks[stage].sequential||!answeredBtn.disabled) drawNextCard();});
+answeredBtn.addEventListener("click",()=>{
+  const stage=sequence[currentStageIndex]; answeredThisRound++; if(!stage.includes("Intro")) playedCards[stage.replace("Intro","")].add(currentDeck[currentCardIndex]);
+  cardHistory.push("Answered"); updateHistory("Answered"); updateCounters();
+  if(answeredThisRound===3){flashCounter(answeredBtn); setTimeout(nextStage,500);}else{currentCardIndex++; drawNextCard();}
+});
+skipBtn.addEventListener("click",()=>{
+  const stage=sequence[currentStageIndex]; skipThisRound++; if(!stage.includes("Intro")) playedCards[stage.replace("Intro","")].add(currentDeck[currentCardIndex]);
+  if(!decks[stage].sequential) skippedCards[stage].push(currentDeck[currentCardIndex]);
+  cardHistory.push("Skipped"); updateHistory("Skipped"); updateCounters(); currentCardIndex++; drawNextCard();
+});
+backBtn.addEventListener("click",()=>{
+  if(currentCardIndex>0){ currentCardIndex--; const stage=sequence[currentStageIndex]; const card=currentDeck[currentCardIndex]; showCard(card);
+    const lastAction=cardHistory.pop();
+    if(lastAction==="Answered"){answeredThisRound=Math.max(0,answeredThisRound-1); flashCounter(answeredBtn);}
+    else if(lastAction==="Skipped"){skipThisRound=Math.max(0,skipThisRound-1); flashCounter(skipBtn);}
+    updateCounters();
+  }
+});
+pauseBtn.addEventListener("click",()=>{pauseOverlay.style.display="flex";});
+resumeBtn.addEventListener("click",()=>{pauseOverlay.style.display="none";});
+pauseOverlay.addEventListener("click",()=>{pauseOverlay.style.display="none";});
+document.addEventListener("keydown",e=>{if(e.key==="Escape") pauseOverlay.style.display="none";});
+restartLevelBtn.addEventListener("click",()=>{
+  const stage=sequence[currentStageIndex], mainStage=stage.includes("Intro")?sequence[currentStageIndex+1]:sequence[currentStageIndex];
+  restartLevelIntro=true;
+  currentDeck=[...decks[mainStage.replace(/Intro$/,"Intro")].cards,...shuffle(decks[mainStage].cards)];
+  currentCardIndex=0; answeredThisRound=0; skipThisRound=0; cardHistory=[]; updateCounters(); drawNextCard();
+});
+restartGameBtn.addEventListener("click",()=>{resetGame(); cardHistory=[];});
+playAgainBtn.addEventListener("click",()=>{resetGame();});
+endOverlay.addEventListener("click",()=>{resetGame();});
+document.addEventListener("keydown",e=>{if(endOverlay.style.display==="flex") resetGame();});
+
+</script>
+</body>
+</html>
